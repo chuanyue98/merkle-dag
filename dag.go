@@ -1,9 +1,8 @@
 package merkledag
 
 import (
+	"encoding/json"
 	"hash"
-	"sort"
-	"bytes"
 )
 
 type Link struct {
@@ -17,41 +16,77 @@ type Object struct {
 	Data  []byte
 }
 
-// Add 将 Node 中的数据保存在 KVStore 中，并计算出 Merkle Root
 func Add(store KVStore, node Node, h hash.Hash) []byte {
-	// 如果节点是文件，则直接将其数据写入KVStore
+	// 将节点数据写入到 KVStore 中
 	if node.Type() == FILE {
-		fileData := node.(File).Bytes()
-		h.Reset()
-		h.Write(fileData)
-		hashValue := h.Sum(nil)
-		store.Put(hashValue, fileData)
-		return hashValue
-		}
-	// 如果节点是目录，则递归处理子节点
-	if node.Type() == DIR{
-		var object Object
-		var childHashs [][]byte
-	   it := node.(Dir).It()
-	   for it.Next() {
-	       childNode := it.Node()
-	       childHash := Add(store, childNode, h)
-		   childHashs = append(childHashs, childHash)
-		   object.Links = append(object.Links, Link{
-			   Name: childNode.Name(),
-			   Hash: childHash,
-			   Size: int(childNode.Size()),
-		   })
-		   
-	   }
-	   sort.Slice(childHashs, func(i, j int) bool {
-		return bytes.Compare(childHashs[i], childHashs[j]) < 0
-		})
-		h.Reset()
-		for _, hash := range childHashs{
-		h.Write(hash)
-		}
-		return h.Sum(nil)
+		file := node.(File)
+		tmp := StoreFile(store, file, h)
+		jsonMarshal, _ := json.Marshal(tmp)
+		hash := calculateHash(jsonMarshal, h)
+		return hash
+	} else {
+		dir := node.(Dir)
+		tmp := StoreDir(store, dir, h)
+		jsonMarshal, _ := json.Marshal(tmp)
+		hash := calculateHash(jsonMarshal, h)
+		return hash
 	}
-	return nil
+
+}
+
+func calculateHash(data []byte, h hash.Hash) []byte {
+	h.Reset()
+	hash := h.Sum(data)
+	h.Reset()
+	return hash
+}
+
+func StoreFile(store KVStore, file File, h hash.Hash) *Object {
+	data := file.Bytes()
+	blob := Object{Data: data, Links: nil}
+	jsonMarshal, _ := json.Marshal(blob)
+	hash := calculateHash(jsonMarshal, h)
+	store.Put(hash, data)
+	return &blob
+}
+
+func StoreDir(store KVStore, dir Dir, h hash.Hash) *Object {
+	it := dir.It()
+	treeObject := &Object{}
+	for it.Next() {
+		n := it.Node() //当前目录下的node
+		switch n.Type() {
+		case FILE:
+			file := n.(File)
+			tmp := StoreFile(store, file, h)
+			jsonMarshal, _ := json.Marshal(tmp)
+			hash := calculateHash(jsonMarshal, h)
+			treeObject.Links = append(treeObject.Links, Link{
+				Hash: hash,
+				Size: int(file.Size()),
+				Name: file.Name(),
+			})
+			typeName := "link"
+			if tmp.Links == nil {
+				typeName = "blob"
+			}
+			treeObject.Data = append(treeObject.Data, []byte(typeName)...)
+		case DIR:
+			dir := n.(Dir)
+			tmp := StoreDir(store, dir, h)
+			jsonMarshal, _ := json.Marshal(tmp)
+			hash := calculateHash(jsonMarshal, h)
+			treeObject.Links = append(treeObject.Links, Link{
+				Hash: hash,
+				Size: int(dir.Size()),
+				Name: dir.Name(),
+			})
+			typeName := "tree"
+			treeObject.Data = append(treeObject.Data, []byte(typeName)...)
+		}
+	}
+	jsonMarshal, _ := json.Marshal(treeObject)
+	hash := calculateHash(jsonMarshal, h)
+	store.Put(hash, jsonMarshal)
+	return treeObject
 }
